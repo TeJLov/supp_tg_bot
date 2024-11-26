@@ -1,0 +1,109 @@
+import logging
+from aiogram import Router, F
+from aiogram.filters import or_f
+from aiogram.types import CallbackQuery, Message
+from aiogram.fsm.context import FSMContext
+
+from tg_bot.support_bot.filters.is_persons import IsLearner
+from tg_bot.support_bot.states.state_bot import FSMMenu
+from tg_bot.support_bot.keyboards.inlinekb import build_inline_kb
+from tg_bot.support_bot.db_utils.for_users import check_subs, get_learner
+from tg_bot.support_bot.db_utils.table_requests import create_new_question
+from tg_bot.support_bot.handlers.txt_for_menu import (
+    mentor_menu, back, start_menu_kb, MMENU_TXT
+    )
+
+logger = logging.getLogger(__name__)
+router = Router()
+
+@router.callback_query(F.data == "key1st", FSMMenu.mmenu, IsLearner())
+async def callback_menu_mentor(callback: CallbackQuery,
+                            state: FSMContext
+                            ):
+    '''
+    Меню работы с наставником
+    '''
+    await state.set_state(FSMMenu.menu_mentor)
+    inline_kb = await build_inline_kb(mentor_menu)
+    await callback.message.edit_text("Выберите пункт из меню:",
+                                    reply_markup=inline_kb.as_markup())
+
+@router.callback_query(F.data == "key1st", FSMMenu.mmenu)
+async def callback_not_learner(callback: CallbackQuery,
+                            state: FSMContext
+                            ):
+    """
+    Сработает если не ученик хочет 
+    """
+    inline_kb = await build_inline_kb(back)
+    await state.set_state(FSMMenu.menu_mentor)
+    await callback.message.edit_text(
+        "Работа с наставником доступна только ученикам", reply_markup=inline_kb.as_markup()
+        )
+
+@router.callback_query(F.data == "back", FSMMenu.menu_mentor)
+async def callback_back_to_mmenu(callback: CallbackQuery,
+                            state: FSMContext
+                            ):
+    """
+    Назад к главному меню
+    """
+    inline_kb = await build_inline_kb(start_menu_kb)
+    await state.set_state(FSMMenu.mmenu)
+    await callback.message.edit_text(
+        MMENU_TXT, reply_markup=inline_kb.as_markup()
+        )
+
+@router.callback_query(or_f(F.data == "key1mtrm", F.data == "key2mtrm"), FSMMenu.menu_mentor)
+async def callback_mentor_theme(callback: CallbackQuery,
+                            state: FSMContext
+                            ):
+    """
+    Тема обращения
+    """
+    if await check_subs(callback.from_user.id, callback.data):
+        await state.update_data(menu_mentor=callback.data)
+        await state.set_state(FSMMenu.them_mentor)
+        await callback.message.edit_text(
+            "Напишите кратко тему вопроса. Ограничение: только текст, 80 символов"
+            )
+    else:
+        inline_kb = await build_inline_kb(back)
+        await callback.message.edit_text(
+            "Не найдена активная подписка, для покупки или продления оюратитесь техподдержку",
+            reply_markup=inline_kb.as_markup()
+            )
+
+@router.message(F.text, FSMMenu.them_mentor)
+async def message_to_theme(message: Message,
+                            state: FSMContext
+                            ):
+    """
+    Проверка лимита темы и запрос текста обращения к ментеру
+    """
+    if len(message.text) > 80:
+        await message.answer(
+            f"Вы привисли лимит текста на {len(message.text) - 80} символа\n"
+            f"Постарайтесь сократить.\n"
+            f"Еще раз напишите кратко тему вопроса. Ограничение: только текст, 80 символов"
+            )
+    else:
+        await state.update_data(them_mentor=message.text)
+        await state.set_state(FSMMenu.question)
+        await message.answer(
+            "Напишите вопрос наставнику. Можно приложить Фото, Видео, Аудио либо Документ"
+            )
+
+@router.message(FSMMenu.question)
+async def message_question_mentor(message: Message, state: FSMContext):
+    """
+    Захват сообщения ментеру
+    """
+    await state.update_data(question=message.text)
+    data_fsm = await state.get_data()
+    print("data_fsm - ", data_fsm)
+    if await get_learner(message.from_user.id):
+        await create_new_question(data_fsm, from_lid=False)
+    else: await create_new_question(data_fsm, from_lid=True)
+    await message.answer("Ожидайте ответа")
+    await state.set_state(FSMMenu.dialog)
